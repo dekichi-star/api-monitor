@@ -1,9 +1,6 @@
 name: API Monitor
 
 on:
-  schedule:
-    - cron: '27,57 1-15 * * *'
-    - cron: '0 16,19,22 * * *'
   workflow_dispatch:
 
 jobs:
