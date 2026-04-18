@@ -1,0 +1,10 @@
+{
+  "name": "api-monitor",
+  "version": "1.0.0",
+  "description": "Periodic API inventory check with Slack notification",
+  "main": "check.js",
+  "scripts": {
+    "start": "node check.js"
+  },
+  "dependencies": {}
+}

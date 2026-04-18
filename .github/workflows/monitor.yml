@@ -1,0 +1,30 @@
+name: API Monitor
+
+on:
+  schedule:
+    - cron: '27,57 1-15 * * *'
+    - cron: '0 16,19,22 * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run check
+        env:
+          API_URL: ${{ secrets.API_URL }}
+          REQUEST_BODY: ${{ secrets.REQUEST_BODY }}
+          INVENTORY_PATH: ${{ secrets.INVENTORY_PATH }}
+          TARGET_URL: ${{ secrets.TARGET_URL }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SESSION_COOKIE: ${{ secrets.SESSION_COOKIE }}
+        run: node check.js
