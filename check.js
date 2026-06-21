@@ -1,48 +1,48 @@
 const https = require('https');
 
-const API_URL = process.env.API_URL;
-const REQUEST_BODY = process.env.REQUEST_BODY; // template: {{plan}} {{course}} {{date}} {{dateDash}}
-const INVENTORY_PATH = process.env.INVENTORY_PATH;
 const TARGETS = process.env.TARGETS; // JSON array of URL strings or { name, url } objects
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
-const SESSION_COOKIE = process.env.SESSION_COOKIE;
 
 // Politeness delay between targets (ms) so we don't hammer the API.
 const DELAY_MS = Number(process.env.CHECK_DELAY_MS || 1500);
 
-function getAt(obj, path) {
-  return path.split('.').reduce((o, k) => o?.[k], obj);
-}
+const HOST = 'yoyaku.collaborationtours.com';
+const LANGUAGE_ID = 82; // Japanese
+const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) ' +
+  'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1';
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function httpsPost(url, body, cookie) {
+// GET/POST JSON against the reservation host. Returns { status, body }.
+function apiRequest(method, path, payload) {
   return new Promise((resolve, reject) => {
-    const parsed = new URL(url);
+    const data = payload ? JSON.stringify(payload) : null;
     const options = {
-      hostname: parsed.hostname,
-      path: parsed.pathname,
-      method: 'POST',
+      hostname: HOST,
+      path,
+      method,
       headers: {
-        'Cookie': cookie || '',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(body),
-      }
+        'User-Agent': UA,
+        'Accept': 'application/json, text/plain, */*',
+        ...(data ? {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(data),
+          'Origin': `https://${HOST}`,
+        } : {}),
+      },
     };
     const req = https.request(options, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
+      let body = '';
+      res.on('data', chunk => body += chunk);
       res.on('end', () => {
-        try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
-        catch (e) { resolve({ status: res.statusCode, body: data }); }
+        try { resolve({ status: res.statusCode, body: JSON.parse(body) }); }
+        catch (e) { resolve({ status: res.statusCode, body }); }
       });
     });
     req.on('error', reject);
-    req.write(body);
+    if (data) req.write(data);
     req.end();
   });
 }
@@ -58,7 +58,7 @@ function sendSlack(text) {
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(body),
-      }
+      },
     };
     const req = https.request(options, (res) => {
       let data = '';
@@ -113,17 +113,97 @@ function toDash(date) {
   return `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}`;
 }
 
-// Fill {{plan}} {{course}} {{date}} {{dateDash}} in the REQUEST_BODY template.
-function buildBody(template, params) {
-  return template
-    .replace(/\{\{\s*plan\s*\}\}/g, params.plan)
-    .replace(/\{\{\s*course\s*\}\}/g, params.course)
-    .replace(/\{\{\s*dateDash\s*\}\}/g, toDash(params.date))
-    .replace(/\{\{\s*date\s*\}\}/g, params.date);
-}
-
 function targetName(target, params) {
   return target.name || `${params.plan}/${params.course}/${params.date}`;
+}
+
+function uniqSorted(nums) {
+  return [...new Set(nums)].sort((a, b) => a - b);
+}
+
+// Replicates the booking site's own availability check (checkValidBasicPlan):
+// a plan is bookable only when EVERY basic-plan group required by the itinerary
+// schedule (one per night for multi-night stays) is covered by a room/plan that
+// is still reservable (reservationTypeCode !== 'NONE') and before its deadline.
+// Capacity-incompatible rooms are dropped first, mirroring omitOverCapacityHotelClasses.
+function isBookable(searchBody, party) {
+  const ti = searchBody && searchBody.tourItinerary;
+  if (!ti) return { bookable: false, reason: 'no tourItinerary in response' };
+
+  const rooms = (searchBody.tourHotelRoomClasses || []).filter((c) => {
+    const min = (c.hotelRoomClass && c.hotelRoomClass.minimumCapacity) || 0;
+    const max = (c.hotelRoomClass && c.hotelRoomClass.maximumCapacity) || 0;
+    if (!min || !max) return true;
+    return party >= min && party <= max;
+  });
+  if (rooms.length === 0 && ti.numberNights > 0) {
+    return { bookable: false, reason: 'no room fits the party' };
+  }
+
+  const required = uniqSorted(
+    (ti.tourSchedules || []).flatMap(s => (s.tourBasicPlanGroups || []).map(g => g.id))
+  );
+
+  const now = new Date();
+  const allPlans = [].concat(
+    rooms,
+    searchBody.tourBusSeatClasses || [],
+    searchBody.tourBusServiceSeatClasses || [],
+    searchBody.tourOptionClasses || [],
+    searchBody.tourCarRentalClasses || [],
+    searchBody.tourAirplaneSeatClasses || [],
+    searchBody.tourRailroadSeatClasses || [],
+    searchBody.tourRentalClasses || [],
+    searchBody.tourShipSeatClasses || [],
+    searchBody.tourETCs || []
+  ).filter(Boolean);
+
+  const available = uniqSorted(allPlans.filter((c) => {
+    if (c.reservationTypeCode === 'NONE') return false;
+    if (c.webApplicationDeadline) {
+      const dl = new Date(String(c.webApplicationDeadline).replace(' ', 'T') + '+09:00');
+      if (!isNaN(dl) && now >= dl) return false;
+    }
+    return true;
+  }).map(c => c.tourBasicPlanGroupId));
+
+  const bookable = required.length > 0 &&
+    JSON.stringify(required) === JSON.stringify(available);
+  return { bookable, required, available, reason: bookable ? 'OK' : 'required groups not all reservable' };
+}
+
+// Resolve a target to its current availability via the public reservation API:
+//   1) planDetail (GET)  -> tourItineraryId + minimumReservation (party size)
+//   2) tour-basic-plan/search (POST) -> room/plan reservability
+async function checkTarget(target) {
+  const params = extractParams(target);
+  const { plan, course, date } = params;
+
+  const pd = await apiRequest('GET',
+    `/user-api/spice/tour/integrate/tours/planDetail` +
+    `?code=${encodeURIComponent(plan)}&tourItineraryCode=${encodeURIComponent(course)}` +
+    `&departureDate=${date}&operationDate=${date}`);
+  if (pd.status !== 200 || !pd.body || !pd.body.id) {
+    throw new Error(`planDetail failed (status ${pd.status})`);
+  }
+  const tourItineraryId = pd.body.id;
+  const party = (pd.body.tourData && pd.body.tourData.minimumReservation) || 1;
+
+  const sr = await apiRequest('POST',
+    `/user-api/spice/resv/integrate/norm/tour-reservations/tour-basic-plan/search`, {
+      tourItineraryId,
+      departureDate: toDash(date),
+      languageId: LANGUAGE_ID,
+      tourReservationNumbers: [
+        { userTypeId: 1, reservationRoomNumber: 1, numberReservation: party, useUsers: party },
+      ],
+    });
+  if (sr.status !== 200 || !sr.body) {
+    throw new Error(`search failed (status ${sr.status})`);
+  }
+
+  const verdict = isBookable(sr.body, party);
+  return { params, tourItineraryId, party, ...verdict };
 }
 
 async function main() {
@@ -139,63 +219,47 @@ async function main() {
   }
   console.log(`Targets: ${targets.length}`);
 
-  let checkedCount = 0;
+  let okCount = 0;
   let availableCount = 0;
+  let errorCount = 0;
 
   for (let i = 0; i < targets.length; i++) {
     const target = targets[i];
-
-    let params;
-    try {
-      params = extractParams(target);
-    } catch (e) {
-      console.error(`[skip] ${e.message}`);
-      continue;
-    }
-
-    const name = targetName(target, params);
-    const url = target.url || '';
-    const body = buildBody(REQUEST_BODY, params);
+    let name = target.name || target.url || JSON.stringify(target);
 
     try {
-      const result = await httpsPost(API_URL, body, SESSION_COOKIE);
-      checkedCount++;
-      console.log(`- ${name}: status ${result.status}`);
+      const result = await checkTarget(target);
+      name = targetName(target, result.params);
+      okCount++;
+      console.log(`- ${name}: ${result.bookable ? 'AVAILABLE' : 'sold out'}` +
+        ` (req=${JSON.stringify(result.required)} avail=${JSON.stringify(result.available)})`);
 
-      // Cookie is shared across all targets, so one auth failure means every
-      // target would fail — alert once and stop.
-      if (result.status === 401 || result.status === 403) {
+      if (result.bookable) {
+        availableCount++;
         await sendSlack(
-          `⚠️ 認証エラー (${result.status})。SESSION_COOKIE を更新してください。\n⏰ ${now}`
+          `🎉 *空きあり！* ${name}\n` +
+          `🔗 ${target.url || ''}\n` +
+          `⏰ ${now}`
         );
-        console.error('Auth error — aborting remaining checks.');
-        process.exit(1);
-      }
-
-      if (result.status !== 200) {
-        console.error(`  [skip] Unexpected status ${result.status}`);
-      } else {
-        const remaining = getAt(result.body, INVENTORY_PATH) ?? -1;
-        console.log(`  remaining: ${remaining}`);
-        if (remaining > 0) {
-          availableCount++;
-          console.log('  Available! Sending notification...');
-          await sendSlack(
-            `🎉 *空きあり！* ${name}\n` +
-            `🔗 ${url}\n` +
-            `⏰ ${now}`
-          );
-        }
       }
     } catch (err) {
-      // A single target failing (network, bad params, etc.) shouldn't stop the rest.
-      console.error(`  [skip] Error for ${name}: ${err.message}`);
+      // A single target failing shouldn't stop the rest.
+      errorCount++;
+      console.error(`  [skip] ${name}: ${err.message}`);
     }
 
     if (i < targets.length - 1) await sleep(DELAY_MS);
   }
 
-  console.log(`Done. Checked ${checkedCount}/${targets.length}, available ${availableCount}.`);
+  console.log(`Done. ok ${okCount}/${targets.length}, available ${availableCount}, errors ${errorCount}.`);
+
+  // If every target errored, the API likely changed — alert once so it gets noticed.
+  if (okCount === 0 && errorCount > 0) {
+    await sendSlack(
+      `⚠️ 在庫チェックが全${targets.length}件失敗しました。APIの仕様変更の可能性があります。\n⏰ ${now}`
+    );
+    process.exit(1);
+  }
 }
 
 main();
