@@ -21,7 +21,7 @@ jobs:
           API_URL: ${{ secrets.API_URL }}
           REQUEST_BODY: ${{ secrets.REQUEST_BODY }}
           INVENTORY_PATH: ${{ secrets.INVENTORY_PATH }}
-          TARGET_URL: ${{ secrets.TARGET_URL }}
+          TARGETS: ${{ secrets.TARGETS }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           SESSION_COOKIE: ${{ secrets.SESSION_COOKIE }}
         run: node check.js
