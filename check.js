@@ -6,7 +6,7 @@ const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
 // Politeness delay between targets (ms) so we don't hammer the API.
 const DELAY_MS = Number(process.env.CHECK_DELAY_MS || 1500);
 
-const HOST = 'yoyaku.collaborationtours.com';
+const HOST = process.env.API_HOST; // reservation host, kept out of source via secret
 const LANGUAGE_ID = 82; // Japanese
 const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) ' +
   'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1';

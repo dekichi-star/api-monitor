@@ -18,6 +18,7 @@ jobs:
 
       - name: Run check
         env:
+          API_HOST: ${{ secrets.API_HOST }}
           TARGETS: ${{ secrets.TARGETS }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: node check.js
